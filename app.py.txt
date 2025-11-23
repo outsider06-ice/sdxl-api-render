@@ -1,0 +1,147 @@
+# app.py - API SDXL pour Render.com
+import os
+import time
+import torch
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+from diffusers import StableDiffusionXLPipeline
+import io
+import base64
+
+app = Flask(__name__)
+CORS(app)
+
+# ==================== CONFIGURATION SDXL ====================
+print("🔄 Chargement du modèle SDXL...")
+
+# Utiliser le cache Render pour les modèles
+cache_dir = "/opt/render/.cache/huggingface/hub"
+os.makedirs(cache_dir, exist_ok=True)
+
+# Configuration avec gestion mémoire
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    torch_dtype=torch.float16,
+    use_safetensors=True,
+    variant="fp16",
+    cache_dir=cache_dir
+)
+
+# Optimisations mémoire pour Render
+pipe.enable_attention_slicing()
+pipe.enable_memory_efficient_attention()
+
+if torch.cuda.is_available():
+    pipe = pipe.to("cuda")
+    device = "cuda"
+    print("✅ SDXL chargé sur GPU!")
+else:
+    pipe = pipe.to("cpu")
+    device = "cpu" 
+    print("✅ SDXL chargé sur CPU!")
+
+# ==================== 16 STYLES ====================
+STYLES = {
+    "realistic": "photorealistic, 8K resolution, realistic lighting, professional photography, sharp focus, detailed",
+    "cinematic": "cinematic, movie still, dramatic lighting, film atmosphere, wide angle, atmospheric",
+    "illustration": "digital illustration, anime style, vibrant colors, concept art, stylized, artistic",
+    "fantasy": "fantasy art, magical realm, mythical creatures, epic fantasy, enchanted, mystical",
+    "horror": "horror atmosphere, scary, dark fantasy, gothic, haunted, ghostly, eerie lighting",
+    "sci_fi": "science fiction, futuristic, cyberpunk, advanced technology, neon lights, cosmic",
+    "noir": "film noir, black and white, high contrast, dramatic shadows, vintage, mysterious",
+    "concept_art": "concept art, character design, environment design, production art, imaginative",
+    "surrealiste": "surrealism, dreamlike, bizarre, impossible reality, Salvador Dali style, metaphysical, symbolic",
+    "impressionniste": "impressionism, Claude Monet style, brush strokes, light effects, atmospheric, color harmony",
+    "steampunk": "steampunk, Victorian era, mechanical, brass and copper, gears, steam power, retro-futuristic",
+    "watercolor": "watercolor painting, translucent colors, fluid washes, paper texture, artistic brush strokes",
+    "pixart": "pixel art, 8-bit, 16-bit, retro gaming, low resolution, square pixels, nostalgic",
+    "cartoon": "cartoon style, animated series, bold outlines, exaggerated expressions, vibrant flat colors",
+    "abstract": "abstract art, non-representational, geometric shapes, color fields, expressive, modern art",
+    "minimalist": "minimalism, simple composition, clean lines, negative space, essential elements, modern"
+}
+
+# ==================== ROUTES API ====================
+@app.route('/')
+def home():
+    return jsonify({
+        "message": "🚀 SDXL API - 16 Styles Disponibles",
+        "status": "active",
+        "styles": list(STYLES.keys()),
+        "endpoints": {
+            "generate": "POST /generate",
+            "styles": "GET /styles", 
+            "health": "GET /health"
+        }
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({
+        "status": "healthy",
+        "device": device,
+        "model": "SDXL 1.0"
+    })
+
+@app.route('/styles')
+def get_styles():
+    return jsonify({
+        "available_styles": list(STYLES.keys()),
+        "total_styles": len(STYLES)
+    })
+
+@app.route('/generate', methods=['POST'])
+def generate_image():
+    try:
+        data = request.json
+        prompt = data.get('prompt', 'a beautiful landscape')
+        style = data.get('style', 'cinematic')
+        width = min(data.get('width', 1024), 1024)
+        height = min(data.get('height', 1024), 1024)
+        steps = min(data.get('steps', 25), 30)
+        
+        print(f"🎨 Génération - Style: {style}")
+        
+        # Application du style
+        style_prompt = STYLES.get(style, STYLES['cinematic'])
+        full_prompt = f"{prompt}, {style_prompt}, masterpiece, best quality"
+        
+        print("🔄 Génération en cours...")
+        start_time = time.time()
+        
+        # Génération avec timeout implicite
+        image = pipe(
+            prompt=full_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            guidance_scale=7.5
+        ).images[0]
+        
+        generation_time = time.time() - start_time
+        print(f"✅ Image générée en {generation_time:.1f}s!")
+        
+        # Conversion en base64 pour Render
+        img_io = io.BytesIO()
+        image.save(img_io, 'PNG')
+        img_io.seek(0)
+        img_base64 = base64.b64encode(img_io.getvalue()).decode()
+        
+        return jsonify({
+            "status": "success",
+            "style": style,
+            "image_data": f"data:image/png;base64,{img_base64}",
+            "dimensions": f"{width}x{height}",
+            "generation_time": f"{generation_time:.1f}s",
+            "device": device
+        })
+        
+    except Exception as e:
+        print(f"❌ Erreur: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
